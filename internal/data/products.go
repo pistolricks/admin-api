@@ -154,3 +154,57 @@ ORDER BY %s %s, id ASC
 
 	return products, metadata, nil
 }
+
+func (m ProductModel) GetDistinctAll(style string, mill string, filters Filters) ([]*Product, Metadata, error) {
+	query := fmt.Sprintf(`
+        SELECT count(*) OVER(), p.*
+FROM (
+    SELECT DISTINCT ON (attrs->>'style') *
+    FROM products
+    WHERE (to_tsvector('simple', attrs->>'style') @@ plainto_tsquery('simple', $1) OR $1 = '')
+    AND (to_tsvector('simple', attrs->>'mill') @@ plainto_tsquery('simple', $2) OR $2 = '')
+) p
+ORDER BY %s %s, id ASC
+ LIMIT $3 OFFSET $4`, filters.sortColumn(), filters.sortDirection())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	args := []any{style, mill, filters.limit(), filters.offset()}
+
+	rows, err := m.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, Metadata{}, err
+	}
+
+	defer rows.Close()
+
+	totalRecords := 0
+	products := []*Product{}
+
+	for rows.Next() {
+		var product Product
+		var attrsJSON []byte
+
+		err := rows.Scan(&totalRecords, &product.ID, &product.Type, &attrsJSON)
+		if err != nil {
+			return nil, Metadata{}, err
+		}
+
+		// Unmarshal the JSON data into the Attrs struct
+		err = json.Unmarshal(attrsJSON, &product.Attrs)
+		if err != nil {
+			return nil, Metadata{}, err
+		}
+
+		products = append(products, &product)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, Metadata{}, err
+	}
+
+	metadata := calculateMetadata(totalRecords, filters.Page, filters.PageSize)
+
+	return products, metadata, nil
+}
